@@ -1,21 +1,18 @@
 import { redirect } from "next/navigation";
-import { createSupabaseServerClient } from "@/lib/supabase-server";
-import { supabase } from "@/lib/supabase";
+import { getAdminUser } from "@/lib/admin-auth";
+import { supabaseAdmin } from "@/lib/supabase-admin";
+import { formatDateTime, formatTime } from "@/lib/time";
 import CancelButton from "@/app/admin/CancelButton";
 
 export default async function AdminPage() {
-  const authSupabase = await createSupabaseServerClient();
-
-  const {
-    data: { user },
-  } = await authSupabase.auth.getUser();
+  const user = await getAdminUser();
 
   if (!user) {
     redirect("/login");
   }
 
-  // existing appointment code below...
-  const { data: appointments, error } = await supabase
+  // Only query with the privileged client after the admin check above.
+  const { data: appointments, error } = await supabaseAdmin
     .from("appointments")
     .select(`
       id,
@@ -33,6 +30,7 @@ export default async function AdminPage() {
       )
     `)
     .neq("status", "cancelled")
+    .gt("end_time", new Date().toISOString())
     .order("start_time", { ascending: true });
 
   if (error) {
@@ -85,19 +83,18 @@ export default async function AdminPage() {
                       {customer?.name}
                     </h2>
 
-                    <p className="text-gray-600">
+                    <a
+                      href={`tel:+91${customer?.phone}`}
+                      className="text-gray-600 underline"
+                    >
                       {customer?.phone}
-                    </p>
+                    </a>
                   </div>
 
                   <div className="sm:text-right">
                     <p className="font-semibold">
-                      {new Date(
-                        appointment.start_time
-                      ).toLocaleString("en-IN", {
-                        dateStyle: "medium",
-                        timeStyle: "short",
-                      })}
+                      {formatDateTime(appointment.start_time)} –{" "}
+                      {formatTime(appointment.end_time)}
                     </p>
 
                     <p className="text-gray-600">

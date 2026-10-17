@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Nakhooni
 
-## Getting Started
+Appointment booking for Nakhooni nail studio. Next.js + Supabase, deployed on Vercel. All times are Indian Standard Time (Asia/Kolkata).
 
-First, run the development server:
+## Setup
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Create `.env.local` (never commit it) with:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=...
+SUPABASE_SECRET_KEY=sb_secret_...
+ADMIN_EMAILS=owner@example.com
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- `SUPABASE_SECRET_KEY` is the Supabase secret key. It is only used on the server.
+- `ADMIN_EMAILS` is a comma-separated list of the Supabase Auth accounts allowed into `/admin`. Logging in with any other account is not enough.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Set the same four variables in Vercel (Project → Settings → Environment Variables) and redeploy.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+In Supabase:
 
-## Learn More
+1. Run `supabase/security.sql` in the SQL editor, one section at a time.
+2. Authentication → Sign In / Providers: turn off "Allow new users to sign up".
 
-To learn more about Next.js, take a look at the following resources:
+Then run locally:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm install
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Booking rules
 
-## Deploy on Vercel
+Set in `lib/availability.ts` and the `business_hours` table:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Start times every 30 minutes from opening time.
+- The service must finish by `close_time`. The stored closing times already include the 30-minute extension (e.g. 18:30 for a 6:00 PM close).
+- No overlap with non-cancelled appointments or `blocked_times`. The database also enforces this (`appointments_no_overlap`).
+- At least 3 hours' notice, up to 60 days ahead.
+- At most 2 upcoming bookings per phone number.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Pages
+
+- `/` services and prices
+- `/book` booking: service → date and time → details → confirmation
+- `/login`, `/admin` view and cancel upcoming appointments

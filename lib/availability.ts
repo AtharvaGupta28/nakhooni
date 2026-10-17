@@ -1,116 +1,177 @@
-import { supabase } from "@/lib/supabase";
+import "server-only";
 import { fromZonedTime } from "date-fns-tz";
+import { supabaseAdmin } from "@/lib/supabase-admin";
+import { TIMEZONE, addDays, dayOfWeek, todayInIndia } from "@/lib/time";
 
-const TIMEZONE = "Asia/Kolkata";
+// Start times are offered every 30 minutes from opening time.
+const SLOT_INTERVAL_MINUTES = 30;
 
-type AvailableSlot = {
+// Slots must start at least this long after the time of booking.
+const MIN_NOTICE_MINUTES = 3 * 60;
+
+// The last bookable date is this many days after today.
+const MAX_DAYS_AHEAD = 60;
+
+const MINUTE_MS = 60 * 1000;
+
+export type AvailableSlot = {
   start: string;
   end: string;
 };
 
-export async function getAvailableSlots(
-  date: string,
-  durationMinutes: number
-): Promise<AvailableSlot[]> {
-  // The selected date is always interpreted as an Indian date.
-  const selectedDate = new Date(`${date}T00:00:00Z`);
-  const dayOfWeek = selectedDate.getUTCDay();
+type BusinessHours = {
+  day_of_week: number;
+  open_time: string;
+  close_time: string;
+};
 
-  // Get business hours
-  const { data: businessHours, error: hoursError } = await supabase
-    .from("business_hours")
-    .select("*")
-    .eq("day_of_week", dayOfWeek)
-    .eq("active", true)
-    .single();
+type Busy = {
+  start: number;
+  end: number;
+};
 
-  if (hoursError || !businessHours) {
-    return [];
+// The range of Indian dates customers may book.
+export function getBookingWindow(now = new Date()) {
+  const firstDate = todayInIndia(now);
+
+  return {
+    firstDate,
+    lastDate: addDays(firstDate, MAX_DAYS_AHEAD),
+  };
+}
+
+// Returns the available slots for each date from startDate to endDate
+// (inclusive), limited to the booking window. Dates without any free slot
+// are left out.
+//
+// A slot is available when it lies inside that day's business hours (the
+// service must finish by close_time), starts at least MIN_NOTICE_MINUTES from
+// now, and does not overlap a non-cancelled appointment or a blocked time.
+export async function getAvailableSlotsByDate(
+  startDate: string,
+  endDate: string,
+  durationMinutes: number,
+  now = new Date()
+): Promise<Map<string, AvailableSlot[]>> {
+  const slotsByDate = new Map<string, AvailableSlot[]>();
+  const window = getBookingWindow(now);
+  const from = startDate > window.firstDate ? startDate : window.firstDate;
+  const to = endDate < window.lastDate ? endDate : window.lastDate;
+
+  if (from > to) {
+    return slotsByDate;
   }
 
-  // Create IST working-hour boundaries
-  const openingTime = fromZonedTime(
-    `${date}T${businessHours.open_time}`,
-    TIMEZONE
-  );
+  const rangeStart = fromZonedTime(`${from}T00:00:00`, TIMEZONE);
+  const rangeEnd = fromZonedTime(`${addDays(to, 1)}T00:00:00`, TIMEZONE);
 
-  const closingTime = fromZonedTime(
-    `${date}T${businessHours.close_time}`,
-    TIMEZONE
-  );
+  const [hoursResult, appointmentsResult, blockedResult] =
+    await Promise.all([
+      supabaseAdmin
+        .from("business_hours")
+        .select("day_of_week, open_time, close_time")
+        .eq("active", true),
+      supabaseAdmin
+        .from("appointments")
+        .select("start_time, end_time")
+        .lt("start_time", rangeEnd.toISOString())
+        .gt("end_time", rangeStart.toISOString())
+        .neq("status", "cancelled"),
+      supabaseAdmin
+        .from("blocked_times")
+        .select("start_time, end_time")
+        .lt("start_time", rangeEnd.toISOString())
+        .gt("end_time", rangeStart.toISOString()),
+    ]);
 
-  // Get appointments that could overlap this working day
-  const { data: appointments, error: appointmentsError } = await supabase
-    .from("appointments")
-    .select("start_time, end_time")
-    .lt("start_time", closingTime.toISOString())
-    .gt("end_time", openingTime.toISOString())
-    .neq("status", "cancelled");
+  if (hoursResult.error) {
+    throw new Error("Could not fetch business hours");
+  }
 
-  if (appointmentsError) {
+  if (appointmentsResult.error) {
     throw new Error("Could not fetch appointments");
   }
 
-  // Get blocked times that overlap this working day
-  const { data: blockedTimes, error: blockedError } = await supabase
-    .from("blocked_times")
-    .select("start_time, end_time")
-    .lt("start_time", closingTime.toISOString())
-    .gt("end_time", openingTime.toISOString());
-
-  if (blockedError) {
+  if (blockedResult.error) {
     throw new Error("Could not fetch blocked times");
   }
 
-  const slots: AvailableSlot[] = [];
+  const businessHours: BusinessHours[] = hoursResult.data;
+  const busy: Busy[] = [
+    ...appointmentsResult.data,
+    ...blockedResult.data,
+  ].map((range) => ({
+    start: Date.parse(range.start_time),
+    end: Date.parse(range.end_time),
+  }));
 
-  // Start at opening time
-  let slotStart = new Date(openingTime);
+  const earliestStart = now.getTime() + MIN_NOTICE_MINUTES * MINUTE_MS;
+  const duration = durationMinutes * MINUTE_MS;
 
-  while (slotStart < closingTime) {
-    const slotEnd = new Date(
-      slotStart.getTime() + durationMinutes * 60 * 1000
-    );
+  for (let date = from; date <= to; date = addDays(date, 1)) {
+    // A day may have several opening periods; a slot is keyed by its start
+    // so overlapping rows cannot produce duplicates.
+    const slots = new Map<number, AvailableSlot>();
 
-    // Don't allow appointments beyond closing time
-    if (slotEnd > closingTime) {
-      break;
+    for (const hours of businessHours) {
+      if (hours.day_of_week !== dayOfWeek(date)) continue;
+
+      const openingTime = fromZonedTime(
+        `${date}T${hours.open_time}`,
+        TIMEZONE
+      ).getTime();
+
+      const closingTime = fromZonedTime(
+        `${date}T${hours.close_time}`,
+        TIMEZONE
+      ).getTime();
+
+      for (
+        let start = openingTime;
+        start + duration <= closingTime;
+        start += SLOT_INTERVAL_MINUTES * MINUTE_MS
+      ) {
+        const end = start + duration;
+
+        if (start < earliestStart) continue;
+
+        const overlaps = busy.some(
+          (range) => start < range.end && end > range.start
+        );
+
+        if (!overlaps) {
+          slots.set(start, {
+            start: new Date(start).toISOString(),
+            end: new Date(end).toISOString(),
+          });
+        }
+      }
     }
 
-    // Check existing appointments
-    const overlapsAppointment = appointments?.some((appointment) => {
-      const appointmentStart = new Date(appointment.start_time);
-      const appointmentEnd = new Date(appointment.end_time);
-
-      return (
-        slotStart < appointmentEnd &&
-        slotEnd > appointmentStart
+    if (slots.size > 0) {
+      slotsByDate.set(
+        date,
+        [...slots.entries()]
+          .sort(([a], [b]) => a - b)
+          .map(([, slot]) => slot)
       );
-    });
-
-    // Check blocked times
-    const overlapsBlockedTime = blockedTimes?.some((blocked) => {
-      const blockedStart = new Date(blocked.start_time);
-      const blockedEnd = new Date(blocked.end_time);
-
-      return (
-        slotStart < blockedEnd &&
-        slotEnd > blockedStart
-      );
-    });
-
-    if (!overlapsAppointment && !overlapsBlockedTime) {
-      slots.push({
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-      });
     }
-
-    // Next possible start time: 30 minutes later
-    slotStart = new Date(
-      slotStart.getTime() + 30 * 60 * 1000
-    );
   }
 
-  return slots;
+  return slotsByDate;
+}
+
+export async function getAvailableSlots(
+  date: string,
+  durationMinutes: number,
+  now = new Date()
+): Promise<AvailableSlot[]> {
+  const slotsByDate = await getAvailableSlotsByDate(
+    date,
+    date,
+    durationMinutes,
+    now
+  );
+
+  return slotsByDate.get(date) ?? [];
 }

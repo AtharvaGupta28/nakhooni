@@ -1,13 +1,17 @@
-import { supabase } from "@/lib/supabase";
+import Link from "next/link";
+import { getActiveServices } from "@/lib/services";
+import { formatDuration } from "@/lib/time";
+
+// Read services on each request so price changes show without a redeploy.
+export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const { data: services, error } = await supabase
-    .from("services")
-    .select("*")
-    .eq("active", true)
-    .order("price", { ascending: true });
+  let services;
 
-  if (error) {
+  try {
+    services = await getActiveServices();
+  } catch (error) {
+    console.error(error);
     return <div>Something went wrong.</div>;
   }
 
@@ -20,12 +24,19 @@ export default async function Home() {
           Nail Studio
         </p>
 
+        <Link
+          href="/book"
+          className="mt-6 inline-block rounded-lg bg-black px-6 py-3 font-medium text-white"
+        >
+          Book an appointment
+        </Link>
+
         <h2 className="mt-12 text-2xl font-semibold">
           Services
         </h2>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
-          {services?.map((service) => (
+          {services.map((service) => (
             <div
               key={service.id}
               className="rounded-xl border p-5"
@@ -46,7 +57,7 @@ export default async function Home() {
                 </span>
 
                 <span className="text-sm text-gray-500">
-                  {service.duration_minutes} min
+                  {formatDuration(service.duration_minutes)}
                 </span>
               </div>
             </div>
